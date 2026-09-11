@@ -112,6 +112,6 @@ class QwenClassifier:
         data = json.loads(message["content"])
 
         return ClassificationResult(
-        intent=data["intent"],
-        confidence=float(data["confidence"]),
-    )
+            intent=data["intent"],
+            confidence=float(data["confidence"]),
+        )

@@ -15,6 +15,20 @@ SUPPORT_FILE = Path(
 
 
 class TfidfRetriever:
+    """
+    Resolution-oriented TF-IDF retriever.
+
+    The historical corpus is noisy, so retrieval is performed in
+    two stages:
+
+    1. Find historically similar customer messages.
+    2. Rank the support responses associated with those conversations
+       primarily by how relevant the response is to the current query.
+
+    Unlike v1, customer similarity is NOT allowed to dominate the
+    final evidence score.
+    """
+
     def __init__(
         self,
         customer_file: Path = CUSTOMER_FILE,
@@ -26,7 +40,7 @@ class TfidfRetriever:
         self.customer_messages = []
         self.support_by_conversation = {}
 
-        self.vectorizer = TfidfVectorizer(
+        self.customer_vectorizer = TfidfVectorizer(
             lowercase=True,
             ngram_range=(1, 2),
             min_df=1,
@@ -36,10 +50,13 @@ class TfidfRetriever:
         self.customer_matrix = None
 
         self._load_data()
-        self._build_index()
+        self._build_customer_index()
+
+    # ---------------------------------------------------------
+    # Data loading
+    # ---------------------------------------------------------
 
     def _load_data(self):
-        # Load historical customer messages
         with self.customer_file.open(
             "r",
             encoding="utf-8",
@@ -52,7 +69,6 @@ class TfidfRetriever:
                     json.loads(line)
                 )
 
-        # Load historical Apple Support responses
         with self.support_file.open(
             "r",
             encoding="utf-8",
@@ -72,26 +88,34 @@ class TfidfRetriever:
                     [],
                 ).append(response)
 
-    def _build_index(self):
+    # ---------------------------------------------------------
+    # Customer index
+    # ---------------------------------------------------------
+
+    def _build_customer_index(self):
         texts = [
             message["text"]
             for message in self.customer_messages
         ]
 
         self.customer_matrix = (
-            self.vectorizer.fit_transform(texts)
+            self.customer_vectorizer.fit_transform(
+                texts
+            )
         )
+
+    # ---------------------------------------------------------
+    # Retrieval
+    # ---------------------------------------------------------
 
     def search(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int = 10,
         responses_per_conversation: int = 3,
     ):
         """
-        Retrieve historically similar customer problems
-        and rank Apple Support responses from the
-        corresponding conversations.
+        Retrieve historical support resolutions relevant to query.
         """
 
         if not query.strip():
@@ -99,11 +123,13 @@ class TfidfRetriever:
 
         # -------------------------------------------------
         # Stage 1:
-        # Find historically similar customer messages
+        # Find similar historical customer messages.
         # -------------------------------------------------
 
-        query_vector = self.vectorizer.transform(
-            [query]
+        query_vector = (
+            self.customer_vectorizer.transform(
+                [query]
+            )
         )
 
         similarities = cosine_similarity(
@@ -117,11 +143,11 @@ class TfidfRetriever:
         seen_conversations = set()
 
         for index in ranked_indices:
-            similarity = float(
+            customer_similarity = float(
                 similarities[index]
             )
 
-            if similarity <= 0:
+            if customer_similarity <= 0:
                 break
 
             customer = self.customer_messages[index]
@@ -130,8 +156,6 @@ class TfidfRetriever:
                 "conversation_id"
             ]
 
-            # Only keep one representative customer
-            # message from each conversation.
             if conversation_id in seen_conversations:
                 continue
 
@@ -141,9 +165,12 @@ class TfidfRetriever:
 
             conversation_matches.append(
                 {
-                    "customer_similarity": similarity,
-                    "conversation_id": conversation_id,
-                    "matched_customer": customer,
+                    "customer_similarity":
+                        customer_similarity,
+                    "conversation_id":
+                        conversation_id,
+                    "matched_customer":
+                        customer,
                 }
             )
 
@@ -152,8 +179,13 @@ class TfidfRetriever:
 
         # -------------------------------------------------
         # Stage 2:
-        # Rank support responses inside each matched
-        # conversation.
+        # Rank support responses.
+        #
+        # IMPORTANT:
+        # The incoming query is compared directly against
+        # the support response.
+        #
+        # This makes response relevance the main signal.
         # -------------------------------------------------
 
         results = []
@@ -173,76 +205,106 @@ class TfidfRetriever:
             response_results = (
                 self._rank_support_responses(
                     query=query,
-                    matched_customer=(
-                        match[
-                            "matched_customer"
-                        ]["text"]
-                    ),
-                    support_responses=(
-                        support_responses
-                    ),
+                    support_responses=support_responses,
                     top_k=responses_per_conversation,
                 )
             )
 
             for response in response_results:
+                response_similarity = float(
+                    response["similarity"]
+                )
+
+                customer_similarity = float(
+                    match["customer_similarity"]
+                )
+
+                # V2:
+                #
+                # Response relevance is dominant.
+                # Customer similarity is only a supporting signal.
+                #
+                # 80% response relevance
+                # 20% customer-problem similarity
+                final_score = (
+                    0.8 * response_similarity
+                    + 0.2 * customer_similarity
+                )
+
                 results.append(
                     {
-                        "customer_similarity": (
-                            match[
-                                "customer_similarity"
-                            ]
-                        ),
-                        "response_similarity": (
-                            response[
-                                "similarity"
-                            ]
-                        ),
-                        "conversation_id": (
-                            conversation_id
-                        ),
-                        "matched_customer": (
+                        "customer_similarity":
+                            customer_similarity,
+
+                        "response_similarity":
+                            response_similarity,
+
+                        "final_score":
+                            final_score,
+
+                        "conversation_id":
+                            conversation_id,
+
+                        "matched_customer":
                             match[
                                 "matched_customer"
-                            ]
-                        ),
-                        "support_response": (
+                            ],
+
+                        "support_response":
                             response[
                                 "response"
-                            ]
-                        ),
+                            ],
                     }
                 )
 
         # -------------------------------------------------
-        # Final ranking
+        # Remove duplicate support responses.
         # -------------------------------------------------
 
-        results.sort(
-            key=lambda result: (
+        unique_results = []
+        seen_responses = set()
+
+        for result in results:
+            text = (
                 result[
-                    "customer_similarity"
-                ]
-                * result[
-                    "response_similarity"
-                ]
-            ),
+                    "support_response"
+                ]["text"]
+                .strip()
+                .lower()
+            )
+
+            if text in seen_responses:
+                continue
+
+            seen_responses.add(text)
+            unique_results.append(result)
+
+        # -------------------------------------------------
+        # Final ranking.
+        # -------------------------------------------------
+
+        unique_results.sort(
+            key=lambda result: result[
+                "final_score"
+            ],
             reverse=True,
         )
 
-        return results
+        return unique_results
+
+    # ---------------------------------------------------------
+    # Support-response ranking
+    # ---------------------------------------------------------
 
     def _rank_support_responses(
         self,
         query: str,
-        matched_customer: str,
         support_responses: list,
         top_k: int,
     ):
         """
-        Rank Apple Support responses using TF-IDF
-        similarity against the incoming query plus
-        the matched historical customer message.
+        Rank historical Apple Support responses directly
+        against the incoming customer query.
         """
 
         if not support_responses:
@@ -253,7 +315,7 @@ class TfidfRetriever:
             for response in support_responses
         ]
 
-        response_vectorizer = TfidfVectorizer(
+        vectorizer = TfidfVectorizer(
             lowercase=True,
             ngram_range=(1, 2),
             min_df=1,
@@ -261,19 +323,11 @@ class TfidfRetriever:
         )
 
         response_matrix = (
-            response_vectorizer.fit_transform(
-                texts
-            )
+            vectorizer.fit_transform(texts)
         )
 
-        combined_query = (
-            f"{query} {matched_customer}"
-        )
-
-        query_vector = (
-            response_vectorizer.transform(
-                [combined_query]
-            )
+        query_vector = vectorizer.transform(
+            [query]
         )
 
         similarities = cosine_similarity(
@@ -290,12 +344,12 @@ class TfidfRetriever:
         for index in ranked_indices[:top_k]:
             results.append(
                 {
-                    "similarity": float(
-                        similarities[index]
-                    ),
-                    "response": (
-                        support_responses[index]
-                    ),
+                    "similarity":
+                        float(
+                            similarities[index]
+                        ),
+                    "response":
+                        support_responses[index],
                 }
             )
 
