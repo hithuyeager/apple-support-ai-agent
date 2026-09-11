@@ -1,5 +1,9 @@
+data/raw/*
+data/processed/*
+*.csv
+*.jsonl
+
 .env
-.venv/
 __pycache__/
-*.pyc
 venv/
+.venv/
