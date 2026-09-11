@@ -48,7 +48,7 @@ The repository is designed to be runnable from a clean clone.
 ### Clone
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/hithuyeager/apple-support-ai-agent.git
 cd apple-support-ai-agent
 ```
 
