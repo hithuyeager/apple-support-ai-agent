@@ -1,9 +1,12 @@
 data/raw/*
 data/processed/*
 *.csv
-*.jsonl
-
 .env
 __pycache__/
-venv/
 .venv/
+venv/
+
+# Keep the golden evaluation set versioned
+!data/evaluation/
+!data/evaluation/eval_set.jsonl
+!data/evaluation/README.md
